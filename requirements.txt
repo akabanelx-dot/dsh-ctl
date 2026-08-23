@@ -1,3 +1,8 @@
 pystray>=0.19
 pillow
-pyinstaller
+# Pinned: 6.22.1 added a onefile parent-process security check
+# (GHSA-9fxf-4qw3-ghmr) that FALSE-POSITIVEs for windowed apps whose exe
+# path contains non-ASCII characters (e.g. a CJK Windows user name):
+# "Security validation failure: parent process has different executable!".
+# See upstream issues #9507/#9508. Un-pin once a fixed release lands.
+pyinstaller==6.22.0

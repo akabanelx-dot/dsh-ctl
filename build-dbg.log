@@ -1,0 +1,91 @@
+145 INFO: PyInstaller: 6.22.1, contrib hooks: 2026.6
+145 INFO: Python: 3.13.6
+176 INFO: Platform: Windows-11-10.0.26200-SP0
+176 INFO: Python environment: C:\Users\≥‡”¿ºœº\AppData\Local\Programs\Python\Python313
+177 INFO: wrote C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\dsh-dbg.spec
+179 INFO: Removing temporary files and cleaning cache in C:\Users\≥‡”¿ºœº\AppData\Local\pyinstaller
+189 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\≥‡”¿ºœº\\Documents\\dsh-ctl',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\python313.zip',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\DLLs',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\win32',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\win32\\lib',
+ 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\Pythonwin',
+ 'C:\\Users\\≥‡”¿ºœº\\Documents\\dsh-ctl']
+987 INFO: Appending 'datas' from .spec
+988 INFO: checking Analysis
+988 INFO: Building Analysis because Analysis-00.toc is non existent
+988 INFO: Looking for Python shared library...
+988 INFO: Using Python shared library: C:\Users\≥‡”¿ºœº\AppData\Local\Programs\Python\Python313\python313.dll
+988 INFO: Running Analysis Analysis-00.toc
+988 INFO: Target bytecode optimization level: 0
+988 INFO: Initializing module dependency graph...
+989 INFO: Initializing module graph hook caches...
+1015 INFO: Analyzing modules for base_library.zip ...
+2087 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+2427 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+4814 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+7177 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+8342 INFO: Caching module dependency graph...
+8494 INFO: Analyzing C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\main.py
+8539 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+8544 INFO: TclTkInfo: initializing cached Tcl/Tk info...
+9271 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+9293 INFO: Processing standard module hook 'hook-pystray.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+9587 INFO: Processing pre-safe-import-module hook 'hook-six.moves.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+9643 INFO: Processing pre-safe-import-module hook 'hook-gi.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+9659 INFO: Processing standard module hook 'hook-PIL.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+9713 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+10285 INFO: Processing standard module hook 'hook-PIL.Image.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+10583 INFO: Processing standard module hook 'hook-numpy.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+11800 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+12533 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+13440 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+15635 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+16347 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+16624 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+19635 INFO: Processing standard module hook 'hook-psutil.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+23686 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+24009 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+24015 INFO: SetuptoolsInfo: initializing cached setuptools info...
+26055 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+26621 INFO: Processing standard module hook 'hook-PIL.ImageFilter.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+27566 INFO: Processing module hooks (post-graph stage)...
+28440 INFO: Processing standard module hook 'hook-PIL.SpiderImagePlugin.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28661 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28696 INFO: Performing binary vs. data reclassification (931 entries)
+35307 INFO: Looking for ctypes DLLs
+35411 INFO: Analyzing run-time hooks ...
+35415 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+35419 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+35425 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+35430 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+35493 INFO: Creating base_library.zip...
+35531 INFO: Looking for dynamic libraries
+35949 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\≥‡”¿ºœº\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\numpy.libs']
+35949 INFO: Extra DLL search directories (PATH): []
+38386 INFO: Warnings written to C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\build\dsh-dbg\warn-dsh-dbg.txt
+38523 INFO: Graph cross-reference written to C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\build\dsh-dbg\xref-dsh-dbg.html
+38646 INFO: checking PYZ
+38646 INFO: Building PYZ because PYZ-00.toc is non existent
+38646 INFO: Building PYZ (ZlibArchive) C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\build\dsh-dbg\PYZ-00.pyz
+39994 INFO: Building PYZ (ZlibArchive) C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\build\dsh-dbg\PYZ-00.pyz completed successfully.
+40077 INFO: checking PKG
+40077 INFO: Building PKG because PKG-00.toc is non existent
+40078 INFO: Building PKG (CArchive) dsh-dbg.pkg
+62315 INFO: Building PKG (CArchive) dsh-dbg.pkg completed successfully.
+62362 INFO: Bootloader C:\Users\≥‡”¿ºœº\AppData\Local\Programs\Python\Python313\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
+62362 INFO: checking EXE
+62362 INFO: Building EXE because EXE-00.toc is non existent
+62362 INFO: Building EXE from EXE-00.toc
+62363 INFO: Copying bootloader EXE to C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\dist\dsh-dbg.exe
+62479 INFO: Copying icon to EXE
+62519 INFO: Copying 0 resources to EXE
+62519 INFO: Embedding manifest in EXE
+62603 INFO: Appending PKG archive to EXE
+62969 INFO: Fixing EXE headers
+63865 INFO: Building EXE from EXE-00.toc completed successfully.
+63925 INFO: Build complete! The results are available in: C:\Users\≥‡”¿ºœº\Documents\dsh-ctl\dist

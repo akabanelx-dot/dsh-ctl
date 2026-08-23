@@ -10,7 +10,10 @@ cd /d "%~dp0"
 echo [1/4] Ensuring build dependencies (versions pinned, no drift)...
 rem Install only if missing: upgrading PyInstaller between builds changes the
 rem icon PNG encoding and would trip the icon-protection gate for no reason.
-python -m pip install --quiet pystray pillow pyinstaller
+rem pyinstaller is HARD-PINNED: 6.22.1's new onefile parent-process check
+rem (GHSA-9fxf-4qw3-ghmr) false-positives for windowed exes under non-ASCII
+rem user-profile paths ("Security validation failure"), see upstream #9507/#9508.
+python -m pip install --quiet pystray pillow "pyinstaller==6.22.0"
 if errorlevel 1 (
     echo [FAIL] pip install failed
     pause
