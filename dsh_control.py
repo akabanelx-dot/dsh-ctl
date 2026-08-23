@@ -6,6 +6,8 @@ All paths are derived from environment variables at runtime; nothing is
 hard-coded, so this works regardless of the Windows user name.
 """
 
+import ctypes
+from ctypes import wintypes
 import glob
 import os
 import re
@@ -184,6 +186,7 @@ def open_pwa():
     try:
         if os.path.isfile(PWA_WINDOWS_LNK):
             os.startfile(PWA_WINDOWS_LNK)
+            _remember_pwa('windows')
             return
     except OSError:
         pass
@@ -191,13 +194,157 @@ def open_pwa():
         hits = glob.glob(PWA_GLOB)
         if hits:
             os.startfile(hits[0])
+            _remember_pwa('windows')
             return
     except OSError:
         pass
     try:
         os.startfile('http://127.0.0.1:{}'.format(PORT))
+        _remember_pwa('windows')
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------
+# PWA window control
+#
+# The DeepSeek Harness UI is a Chrome PWA window (class Chrome_WidgetWin_1,
+# the SAME class as ordinary browser windows - and the PWA window may even
+# be owned by the very chrome.exe browser process that hosts the user's
+# normal tabs). Killing or matching PROCESSES is therefore unsafe. Instead:
+#   1. every PWA window this tool itself opened is remembered by hwnd
+#      (_remember_pwa, fired after each shortcut launch);
+#   2. close_pwa() sends a graceful WM_CLOSE to the remembered windows;
+#      when none are known (PWA launched manually) it falls back to a
+#      conservative title heuristic that cannot match normal browser
+#      windows (those carry a "- Google Chrome" / "- Microsoft Edge"
+#      title suffix). Processes are NEVER killed.
+# --------------------------------------------------------------------------
+
+PWA_TITLE = 'DeepSeek Harness'
+WM_CLOSE = 0x0010
+
+# hwnds of PWA windows this tool opened, per target ('windows' / 'wsl')
+_pwa_windows = {'windows': set(), 'wsl': set()}
+
+
+def _chromeish_windows():
+    """[(hwnd, pid)] of visible top-level Chrome-family windows."""
+    return [(hwnd, pid) for hwnd, pid, _title, cls in _top_windows()
+            if cls == 'Chrome_WidgetWin_1']
+
+
+def _pwa_title_like(title):
+    """True if a window title looks like the PWA (never a browser window)."""
+    t = (title or '').strip().lower()
+    if not t:
+        return False
+    for suffix in ('- google chrome', '- microsoft edge'):
+        if t.endswith(suffix):
+            return False
+    return PWA_TITLE.lower() in t
+
+
+def _remember_pwa(which):
+    """Watch (background thread) for the PWA window appearing after a launch."""
+    def _work():
+        try:
+            before = set(_chromeish_windows())
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                time.sleep(0.5)
+                new = [h for h, _p in _chromeish_windows()
+                       if (h, _p) not in before]
+                if new:
+                    _pwa_windows[which].update(new)
+                    return
+        except Exception:
+            pass
+    try:
+        threading.Thread(target=_work, daemon=True).start()
+    except RuntimeError:
+        pass
+
+
+def _forget_closed(which):
+    """Drop remembered hwnds that no longer exist."""
+    _pwa_windows[which] = {
+        h for h in _pwa_windows[which]
+        if ctypes.windll.user32.IsWindow(h)}
+
+
+def _top_windows():
+    """[(hwnd, pid, title, class)] for all visible top-level windows."""
+    user32 = ctypes.windll.user32
+    wins = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        title = ctypes.create_unicode_buffer(n + 1) if n else None
+        if title:
+            user32.GetWindowTextW(hwnd, title, n + 1)
+        cls = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls, 256)
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        wins.append((hwnd, pid.value, title.value if title else '', cls.value))
+        return True
+
+    user32.EnumWindows(proto(_cb), 0)
+    return wins
+
+
+def find_pwa_windows(which='windows'):
+    """Locate the PWA's top-level windows. Returns [(hwnd, pid)].
+
+    Primary: windows this tool launched (remembered hwnds, still alive).
+    Fallback: conservative title heuristic - never matches normal browser
+    windows because those carry a "- Google Chrome"/"- Microsoft Edge"
+    title suffix; the other target's known windows are excluded so the
+    two PWAs never close each other.
+    """
+    _forget_closed(which)
+    other = _pwa_windows['wsl' if which == 'windows' else 'windows']
+    pid_of = dict(_chromeish_windows())
+    hits = [(hwnd, pid_of[hwnd]) for hwnd in sorted(_pwa_windows[which])
+            if hwnd in pid_of]
+    if hits:
+        return hits
+    for hwnd, pid, title, cls in _top_windows():
+        if cls != 'Chrome_WidgetWin_1' or hwnd in other:
+            continue
+        if _pwa_title_like(title):
+            hits.append((hwnd, pid))
+    return hits
+
+
+def close_pwa(which='windows'):
+    """Gracefully close the running PWA window(s). Best effort, never raises.
+
+    Sends WM_CLOSE and waits up to 3s. Processes are NEVER killed - the
+    PWA window may share its chrome.exe with the user's normal browsing.
+    Returns (ok, detail).
+    """
+    try:
+        hits = find_pwa_windows(which)
+        if not hits:
+            return True, 'pwa not open'
+        hwnds = [h for h, _pid in hits]
+        user32 = ctypes.windll.user32
+        for hwnd in hwnds:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if not any(user32.IsWindow(h) for h in hwnds):
+                _pwa_windows[which].difference_update(hwnds)
+                return True, 'pwa closed ({})'.format(len(hwnds))
+            time.sleep(0.2)
+        return False, 'pwa window did not close'
+    except Exception as exc:              # never block a restart on this
+        return False, 'close_pwa error: {}'.format(exc)
 
 
 def start_dsh():
@@ -319,7 +466,13 @@ def stop_dsh():
 
 
 def restart_dsh():
-    """Stop if running, then start."""
+    """Close the current PWA window, stop if running, then start.
+
+    start_dsh() opens a fresh PWA once the port is ready, so every
+    restart ends with a brand-new UI window.
+    """
+    ok, why = close_pwa('windows')
+    audit('pwa-close', ok, why)
     if is_running():
         stop_dsh()
     return start_dsh()
@@ -836,6 +989,7 @@ def wsl_open_ui():
     try:
         if os.path.isfile(PWA_WSL_LNK):
             os.startfile(PWA_WSL_LNK)
+            _remember_pwa('wsl')
             return True
     except OSError:
         pass
@@ -844,6 +998,7 @@ def wsl_open_ui():
         return False
     try:
         os.startfile(url)
+        _remember_pwa('wsl')
         return True
     except OSError:
         return False
@@ -931,7 +1086,9 @@ def wsl_stop_dsh():
 
 
 def wsl_restart_dsh():
-    """Stop the WSL dsh if running, then start it again."""
+    """Close the WSL PWA window, stop the WSL dsh if running, start again."""
+    ok, why = close_pwa('wsl')
+    audit('pwa-close-wsl', ok, why)
     if wsl_is_running():
         wsl_stop_dsh()
     return wsl_start_dsh()

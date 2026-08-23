@@ -23,7 +23,7 @@ Extras:
 
 - **Single instance** — a second copy binds `127.0.0.1:47632` and exits quietly.
 - **Action serialization** — rapid menu clicks can't spawn two dsh instances fighting over port 3080.
-- **UI opener discipline** — dsh runs with `--no-open`; the tray controller is the *only* thing that opens the PWA window, so you never get a duplicate browser tab.
+- **UI opener discipline** — dsh runs with `--no-open`; the tray controller is the *only* thing that opens the PWA window, so you never get a duplicate browser tab. **Restart** gracefully closes the current PWA window first (WM_CLOSE only — processes are never killed, your normal browser tabs are untouchable) and opens a fresh one once the service is back.
 - **NAT-mode dual instance** — Windows dsh and WSL dsh can run simultaneously, each on its own loopback.
 - **Audit trail** — every action is appended to `dsh-ctl.log`.
 
