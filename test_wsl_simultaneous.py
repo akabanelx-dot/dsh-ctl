@@ -12,12 +12,13 @@ Every step is appended to test-result.log; the Windows dsh is never
 stopped by this test (it must keep serving throughout).
 """
 
+import os
 import time
 import traceback
 
 import dsh_control as dc
 
-LOG = r'C:\Users\赤羽兰霞\Documents\dsh-ctl\test-result.log'
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test-result.log')
 
 
 def log(msg):

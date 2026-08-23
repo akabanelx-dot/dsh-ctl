@@ -1,5 +1,7 @@
 # dsh-ctl
 
+English | [简体中文](README.zh-CN.md)
+
 A Windows **system-tray controller** for [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (`dsh`).
 Start / stop / restart the web service from the tray icon — on Windows **and** inside WSL — plus control of the
 NapCat QQ OneBot bridge, a live log viewer, and a PyInstaller build pipeline protected by an icon-verification gate.

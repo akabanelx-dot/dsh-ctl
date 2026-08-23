@@ -14,13 +14,14 @@ Scheduler), plus port-holder diagnostics after the Windows dsh stops:
 Every step is appended to test-result.log.
 """
 
+import os
 import re
 import time
 import traceback
 
 import dsh_control as dc
 
-LOG = r'C:\Users\赤羽兰霞\Documents\dsh-ctl\test-result.log'
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test-result.log')
 PORTS = ('3080', '3128')
 
 

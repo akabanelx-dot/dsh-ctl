@@ -8,13 +8,14 @@ If the WSL dsh then starts successfully, the mirrored-loopback
 TIME_WAIT-blocking hypothesis is confirmed.
 """
 
+import os
 import re
 import time
 import traceback
 
 import dsh_control as dc
 
-LOG = r'C:\Users\赤羽兰霞\Documents\dsh-ctl\test-result.log'
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test-result.log')
 
 
 def log(msg):

@@ -13,13 +13,14 @@ including any process we spawn from inside the session. This script:
 Every step is appended to test-result.log; restore failures are retried.
 """
 
+import os
 import sys
 import time
 import traceback
 
 import dsh_control as dc
 
-LOG = r'C:\Users\赤羽兰霞\Documents\dsh-ctl\test-result.log'
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test-result.log')
 
 
 def log(msg):
