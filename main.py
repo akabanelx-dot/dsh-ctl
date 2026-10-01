@@ -48,14 +48,21 @@ class App:
             'stop': dc.stop_dsh,
             'restart': dc.restart_dsh,
             'status': dc.status,
+            # re-open the UI with the running instance's launch token
+            # (DSH >= 0.1.5 rejects the bare origin with 401)
+            'open-ui': dc.open_ui_action,
             'wsl-start': dc.wsl_start_dsh,
             'wsl-stop': dc.wsl_stop_dsh,
             'wsl-restart': dc.wsl_restart_dsh,
             'wsl-status': dc.wsl_status,
-            'napcat-start': dc.napcat_start,
-            'napcat-stop': dc.napcat_stop,
-            'napcat-restart': dc.napcat_restart,
-            'napcat-status': dc.napcat_status,
+            'bot-start': dc.bot_start,
+            'bot-stop': dc.bot_stop,
+            'bot-restart': dc.bot_restart,
+            'bot-status': dc.bot_status,
+            'remote-start': dc.remote_start,
+            'remote-stop': dc.remote_stop,
+            'remote-status': dc.remote_status,
+            'remote-pair': dc.remote_pair,
         }
         # Serialize start/stop/restart: two quick clicks used to spawn two dsh
         # instances and the loser crashed with EADDRINUSE on port 3080.
@@ -101,18 +108,26 @@ class App:
             self.root.after(0, lambda: self._notify('Starting dsh, please wait...', 'dsh-ctl'))
         elif action in ('wsl-start', 'wsl-restart'):
             self.root.after(0, lambda: self._notify('Starting WSL dsh, please wait...', 'dsh-ctl'))
-        elif action in ('napcat-start', 'napcat-restart'):
-            self.root.after(0, lambda: self._notify('Starting NapCat, please wait...', 'dsh-ctl'))
+        elif action in ('bot-start', 'bot-restart'):
+            self.root.after(0, lambda: self._notify('Starting QQ bot (SnowLuma + bridge), please wait...', 'dsh-ctl'))
         try:
             with self._action_lock:
                 result = fn()
         except Exception as exc:  # never let a worker thread die silently
             result = {'ok': False, 'msg': 'error: {}'.format(exc)}
 
-        if action in ('status', 'wsl-status', 'napcat-status'):
+        if action in ('status', 'wsl-status', 'bot-status', 'remote-status'):
             # status queries return {'running': bool, 'pid': ...} - no 'ok'
             # key, so they must never be judged by result.get('ok').
             running = result.get('running', False)
+            if action == 'remote-status':
+                # 远程链路是四件套，通用文案信息量不够，用自带摘要
+                detail = result.get('msg', '')
+                ok = True
+                dc.audit(action, True, detail)
+                self.root.after(0, lambda: self._notify(detail, 'dsh-ctl'))
+                self.root.after(0, self._refresh_menu)
+                return
             detail = 'Running (PID {})'.format(result.get('pid')) if running else 'Not running'
             ok = True
         else:

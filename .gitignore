@@ -22,3 +22,9 @@ test-result.log
 # Debug build artifacts
 dsh-dbg.spec
 build-dbg.log
+
+# Build venv (uv-managed, regenerable)
+.venv-build/
+
+# Session temp
+.tmp/

@@ -9,6 +9,8 @@ hard-coded, so this works regardless of the Windows user name.
 import ctypes
 from ctypes import wintypes
 import glob
+import http.client
+import json
 import os
 import re
 import shutil
@@ -16,9 +18,32 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 
-APPDATA = os.environ.get('APPDATA', '')
+def _env_dir(name, fallback=''):
+    """Read a directory-ish environment variable, tolerating a missing one.
+
+    Every path in this module is derived from the environment (no hard-coded
+    user name), but an *empty* variable used to silently degrade paths into
+    relative ones - e.g. when APPDATA is unset, DSH_DIR became 'DeepSeekHarness'
+    and the token log was written next to the process' working directory
+    instead of under the roaming profile. Always fall back to a real absolute
+    directory so the tool behaves the same from Explorer, a service or a
+    POSIX-flavoured shell.
+    """
+    value = (os.environ.get(name) or '').strip().strip('"')
+    if value and os.path.isabs(value):
+        return value
+    if fallback and os.path.isabs(fallback):
+        return fallback
+    return value
+
+
+_USERPROFILE = _env_dir('USERPROFILE', os.path.expanduser('~'))
+APPDATA = _env_dir('APPDATA', os.path.join(_USERPROFILE, 'AppData', 'Roaming'))
+LOCALAPPDATA = _env_dir('LOCALAPPDATA',
+                        os.path.join(_USERPROFILE, 'AppData', 'Local'))
 DSH_DIR = os.path.join(APPDATA, 'DeepSeekHarness')
 WEB_LOG = os.path.join(DSH_DIR, 'dsh-web.log')
 ERR_LOG = os.path.join(DSH_DIR, 'dsh-web.log.err')
@@ -38,6 +63,49 @@ PORT = 3080
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008
 
+# --------------------------------------------------------------------------
+# DSH >= 0.1.5 Web 入口鉴权适配
+#
+# 0.1.5 起 `dsh web` 启动时把「带入口 token 的 URL」打印到 stdout
+# （形如 http://127.0.0.1:3080/?token=...），裸 `/` 一律 401
+# "dsh web authentication required; reopen the URL printed by dsh web."。
+# 本工具把 dsh 的 stdout 重定向到 WEB_LOG，token 因此就在日志里：启动就绪后
+# 读出来、存盘、并用它打开窗口。用同一个 Chrome profile 打开还能把签名 cookie
+# 种进 PWA 共用 profile，此后 PWA 快捷方式自己也能免 token 打开（cookie 有
+# 有效期，过期后再由本工具重新种一次）。
+#
+# token 本身由内核的 processLaunchToken() 用 randomBytes 生成、只存在进程内存里
+# —— **每个进程一份、仅存内存、无法从外部复原**，但在该进程存活期内可重复使用
+# （不是一次性消耗）；换进程即换 token，旧 URL 立刻失效。
+# --------------------------------------------------------------------------
+
+UI_URL_FILE = os.path.join(DSH_DIR, 'dsh-web.url')
+TOKEN_RE = re.compile(r'dsh web:\s*(http://[^\s]*?token=[A-Za-z0-9_\-]+)')
+
+# PWA 快捷方式所用的 Chrome profile（从 .lnk 里读，取不到则 Default）。必须与
+# PWA 同一个 profile，种下的 cookie 才会被 PWA 窗口共享。
+CHROME_PROFILE_DEFAULT = 'Default'
+_PROGRAM_FILES = _env_dir('ProgramFiles', r'C:\Program Files')
+_PROGRAM_FILES_X86 = _env_dir('ProgramFiles(x86)', r'C:\Program Files (x86)')
+CHROME_EXE_CANDIDATES = (
+    os.path.join(_PROGRAM_FILES, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    os.path.join(_PROGRAM_FILES_X86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    os.path.join(LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+)
+# node 定位：优先官方安装目录（PATH 里第一个 node 未必是最干净的那个）
+NODE_EXE_CANDIDATES = (
+    os.path.join(_PROGRAM_FILES, 'nodejs', 'node.exe'),
+    NODE_EXE,
+)
+
+# 0.1.5 给 profile boot 的写锁加了 deadline；被强杀的进程留下的锁会让下一次启动
+# 直接失败（atomic-write: timed out waiting for the writer lock）。这里在启动前
+# 清理「内容是一个已消失 PID」的锁；task-board\ledger-v2.lock 是 JSON，绝不碰。
+DSH_HOME = os.path.join(_USERPROFILE, '.dsh')
+STALE_LOCK_DIRS = (DSH_HOME, os.path.join(DSH_HOME, 'profiles'))
+_PROXY_VARS = ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+               'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')
+
 # keep a module-level reference so GC never closes the subprocess handles
 _detached_procs = []
 
@@ -47,11 +115,211 @@ _detached_procs = []
 # --------------------------------------------------------------------------
 
 def find_node():
-    """Locate node.exe: prefer the npm copy, fall back to PATH."""
-    for cand in (NODE_EXE, shutil.which('node')):
+    """Locate node.exe: official install dir, then the npm copy, then PATH."""
+    for cand in NODE_EXE_CANDIDATES + (shutil.which('node'),):
         if cand and os.path.isfile(cand):
             return cand
     return None
+
+
+def _registry_path():
+    """Real user PATH from the registry (Machine + User), or ''.
+
+    The tray must hand dsh an environment whose PATH is the one a normal
+    user session has: if it inherits a developer/agent shell's PATH, the
+    managed runtimes there win and dsh's children resolve the wrong
+    interpreter. Concretely the Lingshu (灵枢) bridge shells out to
+    `python -m aeis.mcp.server`; pointing at a Python without `aeis`
+    makes it fail handshake in a loop on every boot.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return ''
+    parts = []
+    for hive, sub in (
+            (winreg.HKEY_LOCAL_MACHINE,
+             r'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'),
+            (winreg.HKEY_CURRENT_USER, r'Environment')):
+        try:
+            with winreg.OpenKey(hive, sub) as key:
+                val, _kind = winreg.QueryValueEx(key, 'Path')
+            if val:
+                parts.append(os.path.expandvars(val))
+        except OSError:
+            continue
+    return os.pathsep.join(parts)
+
+
+def child_env():
+    """Environment for the dsh child process.
+
+    Three 0.1.5-era hazards are neutralised here:
+
+    1. PATH — replaced with the registry PATH so dsh's children (notably the
+       Lingshu bridge's `python`) resolve to the user's real interpreters.
+    2. outbound proxies — DSH >= 0.1.5 honours HTTP_PROXY / HTTPS_PROXY /
+       ALL_PROXY / NO_PROXY from its launch environment for *every* outbound
+       request (0.1.1-rc.2 ignored them). A stale proxy inherited from
+       whatever launched the tray would silently reroute model traffic, so
+       they are removed to preserve the pre-upgrade behaviour. Set them here
+       explicitly to route dsh through Clash on purpose.
+    3. NODE_OPTIONS — dropped as cheap insurance against an injected
+       --require shim (a sandboxed parent can wrap fs.rm, which breaks
+       dsh-atomic-write's lock release).
+    """
+    env = dict(os.environ)
+    reg = _registry_path()
+    if reg:
+        env['PATH'] = reg
+    for name in _PROXY_VARS:
+        env.pop(name, None)
+    env.pop('NODE_OPTIONS', None)
+    return env
+
+
+def _pid_alive(pid):
+    """True when a process with this PID exists."""
+    if not pid or pid <= 0:
+        return False
+    rc, out, _ = run_capture(
+        ['tasklist', '/FI', 'PID eq {}'.format(pid), '/FO', 'CSV', '/NH'], timeout=10)
+    if rc != 0:
+        return True                     # cannot tell -> assume alive, never delete
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith('"') and str(pid) in line.split('","')[1:2][0]:
+            return True
+    return False
+
+
+def clean_stale_locks():
+    """Drop dead-owner writer locks left behind by a killed dsh.
+
+    DSH >= 0.1.5 takes deadline-bounded file locks during profile boot
+    (`dsh-atomic-write`), e.g. `~/.dsh/profiles/node_modules.lock` and
+    `~/.dsh/.credentials.yaml.lock`. `taskkill /F` cannot run their cleanup,
+    so the next start dies with "timed out waiting for the writer lock".
+
+    Only files whose *entire* content is an integer PID owned by a process
+    that no longer exists are removed. Anything else is left alone: e.g.
+    `~/.dsh/task-board/ledger-v2.lock` holds JSON.
+    """
+    removed = []
+    for root in STALE_LOCK_DIRS:
+        if not os.path.isdir(root):
+            continue
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith('.lock'):
+                continue
+            path = os.path.join(root, name)
+            try:
+                if not os.path.isfile(path):
+                    continue
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    raw = f.read(64).strip()
+                pid = int(raw)
+            except (OSError, ValueError):
+                continue                # not a bare PID -> not ours to touch
+            if not _pid_alive(pid):
+                try:
+                    os.remove(path)
+                    removed.append(name)
+                except OSError:
+                    pass
+    return removed
+
+
+def _log_offset():
+    """Current byte size of WEB_LOG (start of this launch's output)."""
+    try:
+        return os.path.getsize(WEB_LOG)
+    except OSError:
+        return 0
+
+
+def ui_url_from_log(offset=0, attempts=40, delay=0.5):
+    """Wait for and return the authenticated root URL printed by `dsh web`.
+
+    `dsh web` prints `dsh web: http://127.0.0.1:3080/?token=...` once the
+    server is ready. Re-reads only the bytes appended after `offset` so a
+    token from an earlier run can never be picked up. Returns '' on timeout.
+    """
+    for _ in range(attempts):
+        try:
+            with open(WEB_LOG, 'r', encoding='utf-8', errors='replace') as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            chunk = ''
+        hits = TOKEN_RE.findall(chunk)
+        if hits:
+            return hits[-1]
+        time.sleep(delay)
+    return ''
+
+
+def save_ui_url(url):
+    """Persist the current launch's authenticated URL for later re-opening."""
+    try:
+        os.makedirs(DSH_DIR, exist_ok=True)
+        with open(UI_URL_FILE, 'w', encoding='utf-8') as f:
+            f.write(url)
+    except OSError:
+        pass
+
+
+def load_ui_url():
+    """Read the saved authenticated URL ('' when absent)."""
+    try:
+        with open(UI_URL_FILE, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def clear_ui_url():
+    """Forget the saved URL (its token belongs to a dead process)."""
+    try:
+        os.remove(UI_URL_FILE)
+    except OSError:
+        pass
+
+
+def find_chrome():
+    """Path of chrome.exe, or ''."""
+    for cand in CHROME_EXE_CANDIDATES:
+        if cand and os.path.isfile(cand):
+            return cand
+    return ''
+
+
+def chrome_profile():
+    """Chrome profile the PWA shortcut uses (defaults to 'Default').
+
+    Read straight out of the .lnk: the shortcut passes
+    `--profile-directory=<name>` to chrome_proxy.exe, and only the same
+    profile shares the signed browser cookie.
+    """
+    for lnk in (PWA_WINDOWS_LNK, PWA_WSL_LNK):
+        try:
+            with open(lnk, 'rb') as f:
+                raw = f.read()
+        except OSError:
+            continue
+        for match in re.finditer(rb'(?:--profile-directory=)([\x20-\x7e]{1,40})',
+                                 raw):
+            return match.group(1).decode('ascii', 'ignore').strip()
+        for blob in re.findall(rb'(?:[\x20-\x7e]\x00){6,}', raw):
+            text = blob.decode('utf-16-le', 'ignore')
+            m = re.search(r'--profile-directory=([^\s"\x00]+)', text)
+            if m:
+                return m.group(1).strip()
+    return CHROME_PROFILE_DEFAULT
 
 
 def run_capture(cmd, timeout=15):
@@ -176,13 +444,56 @@ def audit(action, ok, detail=''):
 # actions
 # --------------------------------------------------------------------------
 
-def open_pwa():
-    """Open the DeepSeek Harness WINDOWS PWA (best effort).
+def open_ui(url=None):
+    """Open the DeepSeek Harness Web UI (best effort).
 
-    Preferred: the dedicated "DeepSeek Harness-windows" Chrome app shortcut;
-    fallback: any legacy "DeepSeek Harness.lnk" under a Chrome dir, then the
-    plain local URL.
+    DSH >= 0.1.5 requires the launch token in the URL; the bare origin always
+    answers 401. So when an authenticated URL is known it MUST be used --
+    otherwise the window shows only
+    "dsh web authentication required; reopen the URL printed by dsh web.".
+
+    Order:
+      1. authenticated URL -> Chrome *app* window in the SAME profile the PWA
+         shortcut uses. Chrome mints the signed cookie in that profile and
+         lands on clean `/`, so the PWA shortcut keeps working afterwards on
+         its own (until the cookie ages out).
+      2. authenticated URL -> default browser (still no stray tab: it
+         redirects to `/`, and no duplicate tab appears because dsh runs with
+         --no-open).
+      3. no token -> legacy PWA shortcut, then the bare origin (may 401).
     """
+    # 1) app window on the authenticated URL, in the PWA's own profile
+    if url and url.startswith('http'):
+        chrome = find_chrome()
+        if chrome:
+            try:
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = 1                  # SW_SHOWNORMAL
+                proc = subprocess.Popen(
+                    [chrome,
+                     '--profile-directory={}'.format(chrome_profile()),
+                     '--app={}'.format(url)],
+                    cwd=os.path.dirname(chrome),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    startupinfo=si,
+                    close_fds=True,
+                )
+                _detached_procs.append(proc)
+                _remember_pwa('windows')
+                return
+            except OSError:
+                pass
+        try:
+            os.startfile(url)
+            _remember_pwa('windows')
+            return
+        except OSError:
+            pass
+
+    # 2) legacy: the dedicated PWA shortcut
     try:
         if os.path.isfile(PWA_WINDOWS_LNK):
             os.startfile(PWA_WINDOWS_LNK)
@@ -198,11 +509,81 @@ def open_pwa():
             return
     except OSError:
         pass
+
+    # 3) last resort: the plain local URL (401 under DSH >= 0.1.5)
     try:
         os.startfile('http://127.0.0.1:{}'.format(PORT))
         _remember_pwa('windows')
     except OSError:
         pass
+
+
+def _token_is_live(url, timeout=5):
+    """True when the server accepts <url>'s token.
+
+    `authorizeIndex` answers 303 (minting the cookie) for a matching token and
+    401 for anything else, so a single non-following request tells them apart.
+    Deliberately bypasses any proxy the tray process inherited.
+    """
+    try:
+        parts = urllib.parse.urlparse(url)
+        path = parts.path or '/'
+        if parts.query:
+            path += '?' + parts.query
+        conn = http.client.HTTPConnection(
+            parts.hostname or '127.0.0.1', parts.port or PORT, timeout=timeout)
+        conn.request('GET', path)
+        resp = conn.getresponse()
+        code = resp.status
+        resp.read()
+        conn.close()
+        return code in (200, 301, 302, 303)
+    except Exception:
+        return False
+
+
+def live_ui_url():
+    """A currently-acceptable authenticated URL, or ''.
+
+    The saved URL is tried first, then the most recent token lines still in
+    WEB_LOG - each is probed against the server, because a token only belongs
+    to the process that printed it. This keeps "Open Web UI" useful even when
+    the running dsh was started before this build of dsh-ctl existed.
+    """
+    candidates = []
+    saved = load_ui_url()
+    if saved:
+        candidates.append(saved)
+    try:
+        with open(WEB_LOG, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read()
+    except OSError:
+        text = ''
+    for url in reversed(TOKEN_RE.findall(text)[-5:]):
+        if url not in candidates:
+            candidates.append(url)
+    for url in candidates:
+        if _token_is_live(url):
+            save_ui_url(url)            # remember the one that actually works
+            return url
+    return ''
+
+
+def open_ui_action():
+    """Tray action: (re)open the UI with a token the live server accepts."""
+    if not is_running():
+        return {'ok': False, 'msg': 'dsh is not running'}
+    url = live_ui_url()
+    if not url:
+        return {'ok': False,
+                'msg': 'no live token found - use Restart dsh to mint one'}
+    open_ui(url)
+    return {'ok': True, 'msg': 'opened UI'}
+
+
+def open_pwa():
+    """Backwards-compatible alias: open the UI (authenticated when possible)."""
+    open_ui(load_ui_url() or None)
 
 
 # --------------------------------------------------------------------------
@@ -354,12 +735,12 @@ def start_dsh():
     # NAT mode (default WSL2) gives WSL its own loopback, so the Windows dsh
     # and the WSL dsh can listen on :3080 simultaneously. No cross-env mutex.
 
-    # Ensure the NapCat OneBot bridge is up before dsh starts (the QQ remote
-    # plugin connects to ws://127.0.0.1:3001/ws). Best effort: a failure here
-    # is audited but must never block dsh itself.
-    ok, why = ensure_napcat()
+    # Ensure the QQ bot chain (SnowLuma + qq-bridge) is up before dsh starts
+    # (qq-bridge talks to the DSH Web API). Best effort: a failure here is
+    # audited but must never block dsh itself.
+    ok, why = ensure_bot()
     if not ok:
-        audit('napcat', False, why)
+        audit('bot', False, why)
 
     node = find_node()
     if not node:
@@ -369,6 +750,17 @@ def start_dsh():
 
     os.makedirs(DSH_DIR, exist_ok=True)
     rotate_logs()
+
+    # DSH >= 0.1.5: a writer lock left behind by the previous kill makes this
+    # boot fail outright ("timed out waiting for the writer lock"). Clear the
+    # dead-owner ones before launching, and forget the previous launch's URL
+    # (its token belongs to a process that is going away).
+    stale = clean_stale_locks()
+    if stale:
+        audit('stale-lock', True, 'cleared: ' + ', '.join(stale))
+    clear_ui_url()
+    # offset = where THIS launch's stdout begins, so only its own token is read
+    offset = _log_offset()
 
     try:
         out_f = open(WEB_LOG, 'ab')
@@ -400,6 +792,10 @@ def start_dsh():
             startupinfo=si,
             creationflags=0,
             close_fds=True,
+            # sanitised environment: real user PATH (so the Lingshu bridge
+            # resolves the right `python`), no inherited outbound proxies
+            # (DSH >= 0.1.5 now honours them), no injected NODE_OPTIONS.
+            env=child_env(),
         )
     except OSError as exc:
         out_f.close()
@@ -410,8 +806,20 @@ def start_dsh():
 
     ok, reason = wait_port_ready(proc, 90)
     if ok:
-        open_pwa()
-        return {'ok': True, 'pid': proc.pid, 'msg': 'started (PID {})'.format(proc.pid)}
+        # dsh prints the authenticated root URL right around the time it binds
+        # the port; read only this launch's slice of the log and keep it, so the
+        # tray can re-open the window later without another restart.
+        url = ui_url_from_log(offset, attempts=60, delay=0.5)
+        if url:
+            save_ui_url(url)
+            audit('ui-token', True, 'captured')
+        else:
+            audit('ui-token', False, 'token line not found in ' + WEB_LOG)
+        open_ui(url or None)
+        msg = 'started (PID {})'.format(proc.pid)
+        if not url:
+            msg += ' (no token captured - the window may show 401)'
+        return {'ok': True, 'pid': proc.pid, 'msg': msg}
 
     err_tail = _err_tail()
     msg = 'start failed (PID {}): {}'.format(proc.pid, reason)
@@ -461,6 +869,10 @@ def stop_dsh():
                     image or 'unknown', pid)}
     run_capture(['taskkill', '/F', '/T', '/PID', str(pid)])
     if wait_port_closed(10):
+        # The token died with the process, and the kill could not release
+        # dsh's own writer locks: drop both so the next start is clean.
+        clear_ui_url()
+        clean_stale_locks()
         return {'ok': True, 'pid': pid, 'msg': 'stopped (PID {})'.format(pid)}
     return {'ok': False, 'pid': pid, 'msg': 'port 3080 still in use'}
 
@@ -479,190 +891,252 @@ def restart_dsh():
 
 
 # --------------------------------------------------------------------------
-# NapCat (OneBot bridge for the QQ remote plugin)
+# QQ 机器人（SnowLuma + qq-bridge）
 #
-# The QQ remote plugin (@dsh-external/dsh-qq-remote) connects to the NapCat
-# OneBot WebSocket at ws://127.0.0.1:3001/ws. dsh-ctl ensures NapCat is up
-# whenever it starts/restarts dsh (best effort, never blocking dsh), and
-# exposes manual Start/Stop/Restart/Status control in the tray menu.
+# qq-bridge 链路：
+#   SnowLuma（OneBot v11：WS 3001 + HTTP 3000，QQ 客户端实现）
+#   └─ qq-bridge 桥接进程（DSH Web API 3080 + 控制台 3100）
+# dsh-ctl 在启动/重启 dsh 时最佳努力确保机器人链路可用（失败只审计、
+# 不阻塞 dsh 本身），并提供托盘 Start/Stop/Restart/Status 控制。
 # --------------------------------------------------------------------------
 
-NAPCAT_PORT = 3001
-NAPCAT_WEBUI_PORT = 6099
-NAPCAT_DIR_DEFAULT = os.path.join(
-    os.path.expanduser('~'), '.dsh', 'napcat', 'napcat-shell')
-# A launched NapCat takes a few seconds to inject QQ and open :3001; within
-# this window another ensure_napcat() call must not launch a second instance
-# (two injected QQ processes would fight over the same bot account).
-NAPCAT_LAUNCH_WINDOW = 15.0
+BOT_WS_PORT = 3001             # SnowLuma OneBot WebSocket 端口
+BOT_HTTP_PORT = 3000           # SnowLuma OneBot HTTP API 端口
+QQ_AGENT_PORT = 3210           # QQ-agent 控制台 / 服务端口
+SNOWLUMA_DIR_DEFAULT = os.path.join('C:', os.sep, 'SnowLuma')
+QQ_AGENT_DIR_DEFAULT = os.path.join('F:', os.sep, 'WorkSpace', 'QQ-agent')
+BOT_LAUNCH_WINDOW = 15.0
+# SnowLuma 的 WebUI 端口：首个实例占 5099，重复启动会顺延到 5100/5101…
+# 用它判断"SnowLuma 进程在跑但没接入 QQ"（此时绝不能再去拉新实例）。
+SNOWLUMA_WEBUI_PORTS = (5099, 5100, 5101, 5102, 5103)
 
-_napcat_lock = threading.Lock()
-_napcat_launching_ts = 0.0
-
-
-def napcat_status():
-    """Return {'running': bool, 'pid': pid} for the NapCat WS port."""
-    pid = _get_port_pid(NAPCAT_PORT)
-    return {'running': pid is not None, 'pid': pid}
+_bot_lock = threading.Lock()
+_bot_launching_ts = 0.0
 
 
-def _napcat_dir():
-    """NapCat install dir: $DSH_NAPCAT_DIR or the default under ~/.dsh."""
-    return os.environ.get('DSH_NAPCAT_DIR') or NAPCAT_DIR_DEFAULT
+def bot_status():
+    """机器人链路状态：SnowLuma（OneBot 3001）+ QQ-agent（控制台 3210）。"""
+    snowluma = _get_port_pid(BOT_WS_PORT) is not None
+    agent = _get_port_pid(QQ_AGENT_PORT) is not None
+    webui_port, webui_pid = _snowluma_webui()
+    return {
+        'running': snowluma and agent,
+        'snowluma': snowluma,
+        # SnowLuma 有进程但 OneBot 没起来 = 未接入 QQ（死实例／待登录）
+        'snowluma_no_qq': (not snowluma) and webui_pid is not None,
+        'snowluma_webui_port': webui_port,
+        'agent': agent,
+        'pid': _get_port_pid(QQ_AGENT_PORT),
+    }
 
 
-def _qq_exe_path():
-    """Resolve QQ.exe: registry first (same as launcher-user.bat), fallback.
-
-    Returns an absolute path or None.
-    """
-    rc, out, _ = run_capture([
-        'reg', 'query',
-        r'HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\QQ',
-        '/v', 'UninstallString',
-    ])
-    if rc == 0:
-        # UninstallString line looks like:
-        #   UninstallString    REG_SZ    "C:\Program Files\Tencent\QQNT\Uninstall.exe"
-        m = re.search(r'REG_SZ\s+("?)([^\r\n]+?)\1\s*$', out, re.M)
-        if m:
-            uninst = m.group(2).strip().strip('"')
-            qq = os.path.join(os.path.dirname(uninst), 'QQ.exe')
-            if os.path.isfile(qq):
-                return qq
-    fallback = r'C:\Program Files\Tencent\QQNT\QQ.exe'
-    return fallback if os.path.isfile(fallback) else None
+def _snowluma_webui():
+    """返回正在监听的 SnowLuma WebUI (port, pid)；都没有则 (None, None)。"""
+    for port in SNOWLUMA_WEBUI_PORTS:
+        pid = _get_port_pid(port)
+        if pid is not None:
+            return port, pid
+    return None, None
 
 
-def _napcat_qq_number():
-    """Bot QQ number for fast login: $DSH_NAPCAT_QQ, else probe
-    config/napcat_<qq>.json (created after the first login)."""
-    env_q = (os.environ.get('DSH_NAPCAT_QQ') or '').strip()
-    if env_q:
-        return env_q
-    cfg_dir = os.path.join(_napcat_dir(), 'config')
+def _snowluma_all_pids():
+    """所有 SnowLuma 实例 PID（OneBot 端口 + 各 WebUI 端口，去重）。"""
+    pids = []
+    for port in (BOT_WS_PORT,) + SNOWLUMA_WEBUI_PORTS:
+        pid = _get_port_pid(port)
+        if pid is not None and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def _kill_parent_launcher(pid):
+    """若 pid 的父进程是启动 SnowLuma 的 cmd（launcher.bat），一并结束，
+    避免留下停在 pause 的隐藏控制台窗口。父进程不匹配时不动。"""
     try:
-        for name in os.listdir(cfg_dir):
-            m = re.match(r'^napcat_(\d+)\.json$', name)
-            if m:
-                return m.group(1)
-    except OSError:
+        out = run_capture(['powershell', '-NoProfile', '-Command',
+                           "(Get-CimInstance Win32_Process -Filter 'ProcessId={}')"
+                           " | Select-Object -ExpandProperty ParentProcessId".format(int(pid))])
+        ppid = ''.join(ch for ch in str(out) if ch.isdigit())
+        if not ppid:
+            return
+        cmdline = run_capture(['powershell', '-NoProfile', '-Command',
+                               "(Get-CimInstance Win32_Process -Filter 'ProcessId={}')"
+                               " | Select-Object -ExpandProperty CommandLine".format(int(ppid))])
+        if 'launcher.bat' in str(cmdline) or 'SnowLuma' in str(cmdline):
+            run_capture(['taskkill', '/F', '/PID', ppid])
+    except Exception:
         pass
-    return None
 
 
-def ensure_napcat():
-    """Ensure the NapCat OneBot bridge is running; launch it if not.
+def _snowluma_dir():
+    """SnowLuma 目录：$DSH_SNOWLUMA_DIR 或默认 C:/SnowLuma。"""
+    return os.environ.get('DSH_SNOWLUMA_DIR') or SNOWLUMA_DIR_DEFAULT
 
-    Idempotent: skips while port 3001 already listens, and a short launch
-    window prevents double-launching while NapCat is still coming up.
-    Returns (ok, reason).
+
+def _qq_agent_dir():
+    """QQ-agent 目录：$DSH_QQ_AGENT_DIR 或默认 F:/WorkSpace/QQ-agent。"""
+    return os.environ.get('DSH_QQ_AGENT_DIR') or QQ_AGENT_DIR_DEFAULT
+
+
+def _wait_port_open(port, timeout_s=60):
+    """Wait until something is LISTENING on 127.0.0.1:<port>."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _get_port_pid(port) is not None:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _launch_hidden(target, cwd, log_name=None):
+    """隐藏窗口启动子进程。
+
+    target 为 .bat 路径（用 cmd /c 包装）或 argv 列表（直接启动）。
+    log_name 非空时把 stdout/stderr 落到 <DSH_DIR>/<log_name> 与同名 .err。
     """
-    global _napcat_launching_ts
-    with _napcat_lock:
-        now = time.time()
-        if now - _napcat_launching_ts < NAPCAT_LAUNCH_WINDOW:
-            return False, 'already launching'
-        # Any NapCat footprint already up? Port 3001 = OneBot WS ready;
-        # port 6099 = NapCat WebUI up (bot may still be logging in). Either
-        # way a second injector would only fight the existing instance and
-        # bounce the same bot account (multi-instance 顶号). Never relaunch
-        # when either is listening.
-        if _get_port_pid(NAPCAT_PORT) is not None:
-            return True, 'already running'
-        if _get_port_pid(NAPCAT_WEBUI_PORT) is not None:
-            return False, 'napcat webui already up (bot not ready) - not relaunching'
-
-        base = _napcat_dir()
-        launcher = os.path.join(base, 'NapCatWinBootMain.exe')
-        hook = os.path.join(base, 'NapCatWinBootHook.dll')
-        for name in ('qqnt.json', 'napcat.mjs'):
-            if not os.path.isfile(os.path.join(base, name)):
-                return False, 'napcat files missing in {}'.format(base)
-        if not os.path.isfile(launcher) or not os.path.isfile(hook):
-            return False, 'napcat launcher missing in {}'.format(base)
-
-        qq = _qq_exe_path()
-        if not qq:
-            return False, 'QQ.exe not found'
-
-        # Mirror launcher-user.bat: rebuild loadNapCat.js, then run the
-        # injector with the NAPCAT_* environment it expects.
-        load_path = os.path.join(base, 'loadNapCat.js')
-        main_path = os.path.join(base, 'napcat.mjs').replace('\\', '/')
-        try:
-            with open(load_path, 'w', encoding='utf-8') as f:
-                f.write('(async () => {{await import("file:///{}")}})()'.format(main_path))
-            env = dict(os.environ)
-            env.update({
-                'NAPCAT_PATCH_PACKAGE': os.path.join(base, 'qqnt.json'),
-                'NAPCAT_LOAD_PATH': load_path,
-                'NAPCAT_INJECT_PATH': hook,
-                'NAPCAT_LAUNCHER_PATH': launcher,
-                'NAPCAT_MAIN_PATH': os.path.join(base, 'napcat.mjs'),
-            })
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            si.wShowWindow = 0                    # SW_HIDE
-            args = [launcher, qq, hook]
-            qq_num = _napcat_qq_number()
-            if qq_num:
-                # Fast login with the saved session. The parameter is the
-                # BARE QQ number (see quickLoginExample.bat) — a "-q" prefix
-                # is NOT recognized and silently falls back to QR login.
-                args += [qq_num]
-            proc = subprocess.Popen(
-                args,
-                cwd=base,               # injector resolves relative assets from its dir
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                startupinfo=si,
-                close_fds=True,
-            )
-        except OSError as exc:
-            return False, 'cannot start napcat: {}'.format(exc)
-
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        if isinstance(target, (list, tuple)):
+            argv = list(target)
+        else:
+            argv = ['cmd', '/c', str(target)]
+        if log_name:
+            out_f = open(os.path.join(DSH_DIR, log_name), 'ab')
+            err_f = open(os.path.join(DSH_DIR, log_name + '.err'), 'ab')
+        else:
+            out_f = open(os.devnull, 'wb')
+            err_f = open(os.devnull, 'wb')
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=out_f,
+            stderr=err_f,
+            startupinfo=si,
+            creationflags=0,
+            close_fds=True,
+        )
+        out_f.close()
+        err_f.close()
         _detached_procs.append(proc)
-        _napcat_launching_ts = time.time()
-        return True, 'launched'
+        return True, 'launched PID {}'.format(proc.pid)
+    except OSError as exc:
+        return False, str(exc)
 
 
-def napcat_start():
-    """Start the NapCat bridge if it is not already running."""
-    ok, why = ensure_napcat()
-    return {'ok': ok, 'msg': why}
+def bot_start():
+    """启动机器人链路（SnowLuma + QQ-agent），缺哪块补哪块。
 
-
-def napcat_stop():
-    """Stop the NapCat bridge: kill the injected QQ instance.
-
-    Target selection: port 3001 (OneBot WS) first; if the bot has not
-    finished logging in, fall back to the NapCat WebUI port (6099). Safety
-    guard: only kill a PID whose image is qq.exe. The user's daily QQ
-    never listens on these ports, so it can never be matched here.
+    QQ-agent 以 headless 服务模式运行（node src/server.js）：控制台在
+    http://127.0.0.1:3210，机器人核心逻辑与桌面端一致，且不依赖 Electron
+    （本机 electron 的 postinstall 被 allow-scripts 策略拦截，桌面壳未装）。
     """
-    pid = _get_port_pid(NAPCAT_PORT) or _get_port_pid(NAPCAT_WEBUI_PORT)
-    if pid is None:
-        return {'ok': False, 'msg': 'napcat not running'}
-    image = _process_image(pid)
-    if image != 'qq.exe':
-        return {'ok': False, 'pid': pid,
-                'msg': 'port {} is held by {} (PID {}), not a napcat instance - refusing to kill'.format(
-                    NAPCAT_PORT, image or 'unknown', pid)}
-    run_capture(['taskkill', '/F', '/T', '/PID', str(pid)])
-    if (_wait_port_closed(NAPCAT_PORT, 10)
-            and _wait_port_closed(NAPCAT_WEBUI_PORT, 10)):
-        return {'ok': True, 'pid': pid, 'msg': 'napcat stopped (PID {})'.format(pid)}
-    return {'ok': False, 'pid': pid, 'msg': 'napcat port still in use'}
+    status = bot_status()
+    launched = []
+    # 1) SnowLuma（QQ 协议端 / OneBot v11）
+    if not status['snowluma']:
+        # 护栏：SnowLuma 已在跑（WebUI 端口在听）却没开 OneBot，说明它没接入 QQ
+        # （机器人 QQ 未登录/未注入）。此时绝不能再拉新实例——否则会累积一堆
+        # 只占 WebUI 端口的僵尸实例（5099→5100→5101…）而 3001 永远不开。
+        webui_port, webui_pid = _snowluma_webui()
+        if webui_pid is not None:
+            return {'ok': False, 'pid': webui_pid,
+                    'msg': ('SnowLuma 已在运行（WebUI :{}）但没有接入 QQ：'
+                            'OneBot :{} 未监听。请打开 http://127.0.0.1:{}/ 确认'
+                            '机器人 QQ（3288828554）已登录/已注入，再点 Start。'
+                            ).format(webui_port, BOT_WS_PORT, webui_port)}
+        launcher = os.path.join(_snowluma_dir(), 'launcher.bat')
+        if not os.path.isfile(launcher):
+            return {'ok': False, 'msg': 'snowluma launcher missing: ' + launcher}
+        ok, why = _launch_hidden(launcher, _snowluma_dir(), 'bot-snowluma.log')
+        if not ok:
+            return {'ok': False, 'msg': 'snowluma start failed: ' + why}
+        launched.append('snowluma')
+        if not _wait_port_open(BOT_WS_PORT, 90):
+            port, pid = _snowluma_webui()
+            hint = ('请在 SnowLuma WebUI（http://127.0.0.1:{}/）确认机器人 QQ 已登录/已注入'
+                    ).format(port) if pid is not None else '请检查 SnowLuma 是否正常启动'
+            return {'ok': False,
+                    'msg': 'SnowLuma 起来了但 OneBot :{} 未监听——{}'.format(BOT_WS_PORT, hint)}
+    # 2) QQ-agent（独立 QQ agent 应用）
+    if not status['agent']:
+        agent_dir = _qq_agent_dir()
+        entry = os.path.join(agent_dir, 'src', 'server.js')
+        if not os.path.isfile(entry):
+            return {'ok': False, 'msg': 'QQ-agent entry missing: ' + entry}
+        node = find_node()
+        if not node:
+            return {'ok': False, 'msg': 'node.exe not found'}
+        ok, why = _launch_hidden([node, entry], agent_dir, 'bot-qq-agent.log')
+        if not ok:
+            return {'ok': False, 'msg': 'QQ-agent start failed: ' + why}
+        launched.append('qq-agent')
+        if not _wait_port_open(QQ_AGENT_PORT, 60):
+            return {'ok': False,
+                    'msg': 'QQ-agent did not listen on :{}'.format(QQ_AGENT_PORT)}
+    msg = 'bot already running'
+    if launched:
+        msg = 'started: ' + ', '.join(launched)
+    return {'ok': True, 'msg': msg}
 
 
-def napcat_restart():
-    """Stop NapCat if running, then start it again."""
-    if napcat_status()['running']:
-        napcat_stop()
-    return napcat_start()
+def bot_stop():
+    """停止机器人链路：先 QQ-agent（3210），再 SnowLuma（3001）。
+
+    安全护栏：只杀监听这些端口且镜像名为 node.exe 的进程，绝不动其它 node。
+    """
+    stopped = []
+    # 1) QQ-agent
+    pid = _get_port_pid(QQ_AGENT_PORT)
+    if pid is not None:
+        image = _process_image(pid)
+        if image != 'node.exe':
+            return {'ok': False, 'pid': pid,
+                    'msg': 'port {} held by {} - refusing to kill'.format(
+                        QQ_AGENT_PORT, image or 'unknown')}
+        run_capture(['taskkill', '/F', '/T', '/PID', str(pid)])
+        stopped.append('qq-agent')
+        _wait_port_closed(QQ_AGENT_PORT, 10)
+    # 2) SnowLuma：清掉**全部**实例（含只占 WebUI 端口、未接入 QQ 的重复实例），
+    #    否则重复实例会一直顺延占用 5100/5101… 且 OneBot 永远起不来。
+    killed = 0
+    for pid in _snowluma_all_pids():
+        image = _process_image(pid)
+        if image != 'node.exe':
+            continue  # 端口被别人占了：跳过而不是误杀
+        run_capture(['taskkill', '/F', '/T', '/PID', str(pid)])
+        _kill_parent_launcher(pid)
+        killed += 1
+    if killed:
+        stopped.append('snowluma x{}'.format(killed))
+        _wait_port_closed(BOT_WS_PORT, 10)
+    if not stopped:
+        return {'ok': False, 'msg': 'bot not running'}
+    return {'ok': True, 'msg': 'bot stopped ({})'.format(', '.join(stopped))}
+
+
+def bot_restart():
+    """重启机器人链路。"""
+    if bot_status()['snowluma'] or bot_status()['agent']:
+        bot_stop()
+    return bot_start()
+
+
+def ensure_bot():
+    """确保机器人链路可用；缺失时启动（带启动窗口防并发）。"""
+    global _bot_launching_ts
+    now = time.time()
+    with _bot_lock:
+        if now - _bot_launching_ts < BOT_LAUNCH_WINDOW:
+            return True, 'bot already starting'
+        _bot_launching_ts = now
+        st = bot_status()
+        if st['snowluma'] and st['agent']:
+            return True, 'bot running'
+        result = bot_start()
+        return result['ok'], result['msg']
 
 
 def status():
@@ -683,7 +1157,7 @@ def tail(path, n_lines=500, max_bytes=256 * 1024):
         except UnicodeDecodeError:
             text = data.decode('gbk', errors='replace')
         lines = text.splitlines()
-        return '\n'.join(lines[-n_lines:])
+        return chr(10).join(lines[-n_lines:])
     except OSError:
         return ''
 
@@ -1092,3 +1566,210 @@ def wsl_restart_dsh():
     if wsl_is_running():
         wsl_stop_dsh()
     return wsl_start_dsh()
+
+
+# ---------------------------------------------------------------------------
+# 手机远程访问（Phone Link）— Tailscale Serve + Caddy + remote-web-ui 配对
+#
+# 链路: 手机 → https://<TS_HOST>(Tailscale Serve 终结 TLS) → 127.0.0.1:8443
+#       (Caddy: /pair* 透传真实主机名，其余 /api/* 把 Host 改写回本机权威)
+#       → 127.0.0.1:19387 (桌面端 DSH)。
+# 配对凭证 365 天，桌面端重启不失效；Caddy 不开机自启，由本工具按需启停。
+# 2026-09-30 实测规则:
+#   · /api/* 若不带 Host 改写，DSH 对非本机权威回 403；
+#   · 配对路径若被改写 Host，pair-app 跳转会指向 127.0.0.1；
+#   · X-Forwarded-Proto 必须强制 https，否则配对跳转生成 http:// 地址
+#     （Tailscale Serve 只监听 443）。
+# ---------------------------------------------------------------------------
+
+REMOTE_PORT = 8443
+REMOTE_DESKTOP_PORT = 19387
+CADDY_DIR = os.path.join(_USERPROFILE, 'dsh-caddy')
+CADDY_EXE = os.path.join(CADDY_DIR, 'caddy.exe')
+CADDYFILE = os.path.join(CADDY_DIR, 'Caddyfile')
+TS_HOST = 'laptop-rt4r6ce8.tail8b7e5b.ts.net'
+PHONE_NAME = 'moricalliope'
+TS_EXE_CANDIDATES = (
+    os.path.join(_env_dir('ProgramFiles', r'C:\Program Files'),
+                 'Tailscale', 'tailscale.exe'),
+    'tailscale',
+)
+
+
+def _tailscale_exe():
+    for cand in TS_EXE_CANDIDATES:
+        if os.path.isabs(cand):
+            if os.path.isfile(cand):
+                return cand
+        else:
+            found = shutil.which(cand)
+            if found:
+                return found
+    return None
+
+
+def _remote_caddy_pid():
+    """监听 8443 且镜像名含 caddy 的进程 PID，否则 None。"""
+    pid = _get_port_pid(REMOTE_PORT)
+    if pid is None:
+        return None
+    image = _process_image(pid)
+    if image and 'caddy' in image.lower():
+        return pid
+    return None
+
+
+def remote_serve_status():
+    """返回 (configured, raw)：Tailscale Serve 是否已把 443 指向 8443。"""
+    ts = _tailscale_exe()
+    if not ts:
+        return False, 'tailscale.exe not found'
+    rc, out, _err = run_capture([ts, 'serve', 'status'], timeout=15)
+    if rc != 0:
+        return False, out
+    return (TS_HOST in out and '8443' in out), out
+
+
+def remote_status():
+    """整条手机链路的状态。running=True 表示四件套全部就绪。"""
+    caddy_pid = _remote_caddy_pid()
+    dsh_pid = _get_port_pid(REMOTE_DESKTOP_PORT)
+    serve_ok, _raw = remote_serve_status()
+    tailnet = False
+    phone = 'unknown'
+    ts = _tailscale_exe()
+    if ts:
+        rc, out, _err = run_capture([ts, 'status'], timeout=15)
+        tailnet = (rc == 0)
+        for line in out.splitlines():
+            if PHONE_NAME in line:
+                phone = 'offline' if 'offline' in line else 'online'
+    running = bool(caddy_pid) and serve_ok and bool(dsh_pid) and tailnet
+    return {
+        'running': running,
+        'pid': caddy_pid,
+        'caddy': bool(caddy_pid),
+        'serve': serve_ok,
+        'dsh': bool(dsh_pid),
+        'tailnet': tailnet,
+        'phone': phone,
+    }
+
+
+def remote_start():
+    """按需拉起手机链路：Caddy（隐藏窗口）+ Tailscale Serve 规则（幂等）。
+
+    不开机自启，也不动桌面端本体——桌面端 DSH（:19387）由用户正常启动。
+    """
+    if not os.path.isfile(CADDY_EXE):
+        return {'ok': False, 'msg': 'caddy.exe missing: ' + CADDY_EXE}
+    if not os.path.isfile(CADDYFILE):
+        return {'ok': False, 'msg': 'Caddyfile missing: ' + CADDYFILE}
+    ts = _tailscale_exe()
+    if not ts:
+        return {'ok': False, 'msg': 'tailscale.exe not found'}
+    launched = []
+    if _remote_caddy_pid() is None:
+        ok, why = _launch_hidden(
+            [CADDY_EXE, 'run', '--config', 'Caddyfile', '--adapter', 'caddyfile'],
+            CADDY_DIR, 'remote-caddy.log')
+        if not ok:
+            return {'ok': False, 'msg': 'caddy start failed: ' + why}
+        launched.append('caddy')
+        if not _wait_port_open(REMOTE_PORT, 15):
+            return {'ok': False,
+                    'msg': 'caddy started but :{} not listening'.format(REMOTE_PORT)}
+    serve_ok, _raw = remote_serve_status()
+    if not serve_ok:
+        rc, out, err = run_capture(
+            [ts, 'serve', '--bg', '--https=443', 'http://127.0.0.1:8443'],
+            timeout=30)
+        serve_ok, raw = remote_serve_status()
+        if not serve_ok:
+            return {'ok': False,
+                    'msg': 'tailscale serve failed: ' + (err or out or raw)[:180]}
+        launched.append('tailscale serve')
+    st = remote_status()
+    msg = 'phone link up ({})'.format(' + '.join(launched) or 'already running')
+    if not st['dsh']:
+        msg += ' — 桌面端 DSH 未启动，先启动桌面端'
+    if st['phone'] == 'offline':
+        msg += ' — 手机 Tailscale 离线'
+    return {'ok': True, 'msg': msg}
+
+
+def remote_stop():
+    """停掉链路：杀 Caddy（镜像守卫）+ 撤 Tailscale Serve 规则。不动桌面端。"""
+    stopped = []
+    pid = _remote_caddy_pid()
+    if pid is not None:
+        image = _process_image(pid)
+        if image and 'caddy' not in image.lower():
+            return {'ok': False, 'pid': pid,
+                    'msg': 'port {} held by {} - refusing to kill'.format(
+                        REMOTE_PORT, image or 'unknown')}
+        run_capture(['taskkill', '/F', '/T', '/PID', str(pid)])
+        _wait_port_closed(REMOTE_PORT, 10)
+        stopped.append('caddy')
+    ts = _tailscale_exe()
+    if ts:
+        serve_ok, _raw = remote_serve_status()
+        if serve_ok:
+            run_capture([ts, 'serve', '--https=443', 'off'], timeout=30)
+            serve_ok, _raw2 = remote_serve_status()
+            if serve_ok:
+                # 兜底：本机只配置了这一条规则，reset 不会误伤别人
+                run_capture([ts, 'serve', 'reset'], timeout=30)
+            stopped.append('serve off')
+    if not stopped:
+        return {'ok': False, 'msg': 'phone link not running'}
+    return {'ok': True, 'msg': 'phone link stopped ({})'.format(', '.join(stopped))}
+
+
+def remote_pair():
+    """签发一枚新的手机配对链接，复制到剪贴板并返回。
+
+    配对链接约 10 分钟有效；配对一次，设备凭证 365 天，桌面端重启不失效。
+    """
+    if _get_port_pid(REMOTE_DESKTOP_PORT) is None:
+        return {'ok': False,
+                'msg': '桌面端 DSH 未启动（:19387 无监听），先启动桌面端再配对'}
+    conn = http.client.HTTPConnection('127.0.0.1', REMOTE_DESKTOP_PORT, timeout=10)
+    try:
+        conn.request('POST', '/api/pair/issue', json.dumps({}),
+                     {'Content-Type': 'application/json'})
+        resp = conn.getresponse()
+        raw = resp.read().decode('utf-8', 'replace')
+    finally:
+        conn.close()
+    if resp.status != 200:
+        return {'ok': False,
+                'msg': 'pair/issue HTTP {}: {}'.format(resp.status, raw[:120])}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {'ok': False, 'msg': 'pair/issue returned non-JSON'}
+    url = data.get('url')
+    if not url:
+        return {'ok': False, 'msg': 'pair/issue missing url: ' + raw[:120]}
+    expires = ''
+    if data.get('expiresAt'):
+        try:
+            expires = '，{} 前有效'.format(
+                datetime.fromtimestamp(data['expiresAt'] / 1000).strftime('%H:%M'))
+        except Exception:
+            pass
+    # 剪贴板：优先 Set-Clipboard（UTF-16 稳），失败退回 clip.exe
+    rc, _out, _err = run_capture(
+        ['powershell', '-NoProfile', '-Command',
+         'Set-Clipboard -Value "{}"'.format(url)], timeout=15)
+    if rc != 0:
+        try:
+            p = subprocess.Popen(['clip'], stdin=subprocess.PIPE,
+                                 creationflags=CREATE_NO_WINDOW)
+            p.communicate(url.encode('utf-16'))
+        except OSError:
+            pass
+    return {'ok': True,
+            'msg': '配对链接已复制到剪贴板{}，手机（Tailscale 在线）直接打开: {}'.format(
+                expires, url)}

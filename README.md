@@ -23,7 +23,11 @@ Extras:
 
 - **Single instance** — a second copy binds `127.0.0.1:47632` and exits quietly.
 - **Action serialization** — rapid menu clicks can't spawn two dsh instances fighting over port 3080.
-- **UI opener discipline** — dsh runs with `--no-open`; the tray controller is the *only* thing that opens the PWA window, so you never get a duplicate browser tab. **Restart** gracefully closes the current PWA window first (WM_CLOSE only — processes are never killed, your normal browser tabs are untouchable) and opens a fresh one once the service is back.
+- **UI opener discipline (incl. the 0.1.5 entry token)** — dsh runs with `--no-open`; the tray controller is the *only* thing that opens the window, so you never get a duplicate browser tab. **Restart** gracefully closes the current window first (WM_CLOSE only — processes are never killed) and opens a fresh one once the service is back.
+  DSH >= 0.1.5 prints an entry-token URL (`http://127.0.0.1:3080/?token=...`) to stdout *once* and answers 401 to the bare origin. dsh-ctl already redirects dsh's stdout into `dsh-web.log`, so it captures that token and opens a **Chrome app window** on it (`--app=<tokenURL>`, sharing the PWA shortcut's profile) — the signed cookie it mints therefore also authenticates the PWA shortcut afterwards (until the cookie ages out). The tray's **Open Web UI** re-opens with a token it has *probed* against the live server, since a token belongs only to the process that printed it.
+- **Stale writer-lock cleanup** — DSH >= 0.1.5 takes deadline-bounded file locks during profile boot; `taskkill /F` cannot run their cleanup, and the leftover lock fails the next start (`atomic-write: timed out waiting for the writer lock`). dsh-ctl clears locks whose content is a dead PID before/after start-stop. `task-board/ledger-v2.lock` is JSON and is never touched.
+- **Sanitised child environment** — PATH for the dsh child comes from the registry (an inherited dev/agent PATH makes the Lingshu bridge's `python -m aeis.mcp.server` resolve to an interpreter without `aeis`, failing handshake on every boot); inherited `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY` (honoured since DSH 0.1.5) and `NODE_OPTIONS` are dropped.
+- **No silent path degradation** — missing environment variables fall back to real absolute directories (a missing `APPDATA` used to turn the log directory into the relative path `DeepSeekHarness`).
 - **NAT-mode dual instance** — Windows dsh and WSL dsh can run simultaneously, each on its own loopback.
 - **Audit trail** — every action is appended to `dsh-ctl.log`.
 

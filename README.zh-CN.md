@@ -23,7 +23,11 @@
 
 - **单实例锁** —— 第二个副本尝试绑定 `127.0.0.1:47632` 失败后静默退出。
 - **动作串行化** —— 快速连点菜单不会拉起两个 dsh 实例争抢 3080 端口。
-- **UI 打开权收归一家** —— dsh 以 `--no-open` 运行；只有托盘控制器负责打开 PWA 窗口，永远不会多出一个重复的浏览器标签页。**重启**会先优雅关闭当前 PWA 窗口（只发 `WM_CLOSE`，绝不杀进程，日常浏览器分毫不动），服务就绪后再拉起一个全新窗口。
+- **UI 打开权收归一家（含 0.1.5 入口鉴权）** —— dsh 以 `--no-open` 运行；只有托盘控制器负责打开窗口，永远不会多出一个重复的浏览器标签页。**重启**会先优雅关闭当前 PWA 窗口（只发 `WM_CLOSE`，绝不杀进程，日常浏览器分毫不动），服务就绪后再拉起一个全新窗口。
+  DSH ≥ 0.1.5 起 `dsh web` 只在 stdout 打印一次带入口 token 的 URL（`http://127.0.0.1:3080/?token=...`），裸 `/` 一律 401。本程序把 dsh 的 stdout 重定向到 `dsh-web.log`，因此能把这个 token 抓下来：启动就绪后用它打开一个 **Chrome 应用窗口**（`--app=<tokenURL>`，且与 PWA 快捷方式共享同一个 profile），token 换来的签名 cookie 因此也落进 PWA，此后 PWA 自己打开同样免鉴权（cookie 有效期内）。托盘新增 **Open Web UI**，会用**实测可用**的 token 重开窗口（token 只属于打印它的那个进程，故逐个探测后再用）。
+- **启动前清理僵尸写锁** —— DSH ≥ 0.1.5 在 profile boot 期间持有带 deadline 的文件写锁；`taskkill /F` 无法触发其清理，残留锁会让下一次启动直接失败（`atomic-write: timed out waiting for the writer lock`）。启动/停止时会自动清掉「内容是一个已消失 PID」的锁；`task-board/ledger-v2.lock` 是 JSON，绝不触碰。
+- **子进程环境净化** —— 传给 dsh 的 PATH 取自注册表（避免继承开发/agent shell 的 PATH，否则灵枢 bridge 的 `python -m aeis.mcp.server` 会解析到没有 `aeis` 的解释器、每次启动都握手失败）；并清除继承来的 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY`（DSH ≥ 0.1.5 开始遵循它们）与 `NODE_OPTIONS`。
+- **路径推导不再静默降级** —— 环境变量缺失时回退到真实绝对目录（此前 `APPDATA` 为空会把日志目录变成相对路径 `DeepSeekHarness`）。
 - **NAT 模式双实例共存** —— Windows dsh 与 WSL dsh 可同时运行，各占独立回环。
 - **审计追踪** —— 每个动作都追加写入 `dsh-ctl.log`。
 
