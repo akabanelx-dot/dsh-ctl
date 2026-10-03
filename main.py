@@ -9,6 +9,7 @@ Threading model (hard rule):
   - balloons and menu refresh return to the main thread via root.after.
 """
 
+import os
 import queue
 import socket
 import sys
@@ -55,10 +56,6 @@ class App:
             'wsl-stop': dc.wsl_stop_dsh,
             'wsl-restart': dc.wsl_restart_dsh,
             'wsl-status': dc.wsl_status,
-            'bot-start': dc.bot_start,
-            'bot-stop': dc.bot_stop,
-            'bot-restart': dc.bot_restart,
-            'bot-status': dc.bot_status,
             'remote-start': dc.remote_start,
             'remote-stop': dc.remote_stop,
             'remote-status': dc.remote_status,
@@ -108,15 +105,13 @@ class App:
             self.root.after(0, lambda: self._notify('Starting dsh, please wait...', 'dsh-ctl'))
         elif action in ('wsl-start', 'wsl-restart'):
             self.root.after(0, lambda: self._notify('Starting WSL dsh, please wait...', 'dsh-ctl'))
-        elif action in ('bot-start', 'bot-restart'):
-            self.root.after(0, lambda: self._notify('Starting QQ bot (SnowLuma + bridge), please wait...', 'dsh-ctl'))
         try:
             with self._action_lock:
                 result = fn()
         except Exception as exc:  # never let a worker thread die silently
             result = {'ok': False, 'msg': 'error: {}'.format(exc)}
 
-        if action in ('status', 'wsl-status', 'bot-status', 'remote-status'):
+        if action in ('status', 'wsl-status', 'remote-status'):
             # status queries return {'running': bool, 'pid': ...} - no 'ok'
             # key, so they must never be judged by result.get('ok').
             running = result.get('running', False)
@@ -158,11 +153,46 @@ class App:
             self.viewer.show()
 
     def _quit(self):
+        """Terminate the tray process, deterministically.
+
+        2026-10-03: the plain "icon.stop() then root.destroy()" version could
+        leave the process alive - the tray icon disappears, the process keeps
+        running and keeps holding the single-instance port, so the next start
+        is refused as "another instance is already running". Guards added:
+          * a hard watchdog (os._exit) armed BEFORE anything can block, so a
+            wedged pystray stop() or a lingering non-daemon thread cannot keep
+            the process alive;
+          * a bounded wait on icon.stop() instead of calling it inline - its
+            Win32 implementation waits for the icon's message loop, and that
+            must never be the reason the watchdog is never reached.
+        """
+        # Arm the watchdog first: from here on the process dies no matter what.
+        timer = threading.Timer(2.0, lambda: os._exit(0))
+        timer.daemon = True
+        timer.start()
+
+        # Stop the icon on a helper thread and give it a bounded grace period.
+        # Waiting matters for looks, not for correctness: killing the process
+        # while Shell_NotifyIcon(NIM_DELETE) is still in flight leaves a ghost
+        # icon in the notification area until the shell happens to refresh it.
+        # Measured cost of a healthy stop() here is ~1ms, so the wait is free;
+        # the 2.0s watchdog above still guarantees the process dies regardless.
         try:
-            self.icon.stop()
+            done = threading.Event()
+            threading.Thread(
+                target=lambda: (self.icon.stop(), done.set()), daemon=True
+            ).start()
+            done.wait(1.5)
         except Exception:
             pass
-        self.root.destroy()
+
+        dc.audit('quit', True, 'tray exit requested')
+        try:
+            self.root.quit()        # break mainloop even if destroy() wedges
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)                 # never return to the caller
 
 
 def main():
@@ -175,7 +205,24 @@ def main():
     app = App(root)
     app._single = single                  # socket stays alive for app lifetime
     app.start()
+
+    # Smoke-test hook for the packaged build: "dsh-ctl.exe --selftest-quit N"
+    # enqueues the same 'quit' action the tray menu pushes, N seconds in, and
+    # writes nothing else. Used to prove the built exe can actually terminate
+    # (ModuleNotFoundError-style failures and hangs cannot be caught by tests
+    # that only import the modules).
+    if len(sys.argv) >= 3 and sys.argv[1] == '--selftest-quit':
+        try:
+            delay = float(sys.argv[2])
+        except ValueError:
+            delay = 3.0
+        threading.Timer(delay, lambda: app.q.put(('quit',))).start()
+
     root.mainloop()
+    # The tk loop has ended: on Windows a PyInstaller build can still be held
+    # open by a non-daemon thread (shell/WinRT helpers). Exit outright instead
+    # of waiting for the interpreter to agree that it is safe to stop.
+    os._exit(0)
 
 
 if __name__ == '__main__':

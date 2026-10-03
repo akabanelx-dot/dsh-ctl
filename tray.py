@@ -58,20 +58,6 @@ def wsl_status_text(_icon=None, _item=None):
     return 'WSL State: Not running'
 
 
-def bot_status_text(_icon=None, _item=None):
-    """Dynamic third menu row: QQ bot (SnowLuma + QQ-agent) state."""
-    st = dc.bot_status()
-    if st['running']:
-        return 'QQ Bot: Running (snowluma@3001 + agent@3210)'
-    if st['snowluma']:
-        return 'QQ Bot: SnowLuma up, QQ-agent down'
-    if st.get('snowluma_no_qq'):
-        return 'QQ Bot: SnowLuma up but NOT hooked to QQ (:{} )'.format(st.get('snowluma_webui_port') or '?')
-    if st['agent']:
-        return 'QQ Bot: QQ-agent up, SnowLuma down'
-    return 'QQ Bot: Not running'
-
-
 def remote_status_text(_icon=None, _item=None):
     """Dynamic fourth menu row: phone remote link (Tailscale + Caddy) state."""
     st = dc.remote_status()
@@ -104,7 +90,6 @@ def build_menu(q):
     return pystray.Menu(
         pystray.MenuItem(status_text, None, enabled=False),
         pystray.MenuItem(wsl_status_text, None, enabled=False),
-        pystray.MenuItem(bot_status_text, None, enabled=False),
         pystray.MenuItem(remote_status_text, None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('Start dsh', _make_cb('start', q)),
@@ -120,12 +105,6 @@ def build_menu(q):
             pystray.MenuItem('Stop WSL dsh', _make_cb('wsl-stop', q)),
             pystray.MenuItem('Restart WSL dsh', _make_cb('wsl-restart', q)),
             pystray.MenuItem('WSL Status', _make_cb('wsl-status', q)),
-        )),
-        pystray.MenuItem('QQ Bot', pystray.Menu(
-            pystray.MenuItem('Start QQ Bot', _make_cb('bot-start', q)),
-            pystray.MenuItem('Stop QQ Bot', _make_cb('bot-stop', q)),
-            pystray.MenuItem('Restart QQ Bot', _make_cb('bot-restart', q)),
-            pystray.MenuItem('QQ Bot Status', _make_cb('bot-status', q)),
         )),
         pystray.MenuItem('Phone Link (手机访问)', pystray.Menu(
             pystray.MenuItem('Start Phone Link', _make_cb('remote-start', q)),

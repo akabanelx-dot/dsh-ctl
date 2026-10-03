@@ -22,18 +22,34 @@ if errorlevel 1 (
 
 echo [2/4] Building exe (onefile, no console)...
 rem ============================================================
-rem  Fix stale TCL_LIBRARY/TK_LIBRARY: when this build runs from a shell
-rem  spawned by a PyInstaller onefile app (dsh-ctl itself), the inherited
-rem  TCL_LIBRARY/TK_LIBRARY point at that app's now-deleted _MEI temp dir,
-rem  which makes tkinter.Tcl() fail and PyInstaller silently EXCLUDES
-rem  tkinter ("tkinter installation is broken"). Point both variables at
-rem  the real Python tcl data dir before building.
+rem  TCL_LIBRARY / TK_LIBRARY: leave them alone before building.
+rem
+rem  History: when this build runs from a shell spawned by a PyInstaller onefile
+rem  app (dsh-ctl itself), the inherited TCL_LIBRARY/TK_LIBRARY point at that
+rem  app's now-deleted _MEI temp dir, which makes tkinter.Tcl() fail and
+rem  PyInstaller silently EXCLUDES tkinter ("tkinter installation is broken").
+rem  The first attempt to guard against that is what this block used to contain
+rem  (2026-10-03 regression fix below) - it introduced a worse failure, so the
+rem  guard is gone. An inherited stale value can still bite; if a build reports
+rem  tkinter missing, run it from a normal cmd / PowerShell window.
 rem ============================================================
-for /f "delims=" %%p in ('python -c "import sys; print(sys.prefix)"') do set "PYPREFIX=%%p"
-set "TCL_LIBRARY=%PYPREFIX%\tcl\tcl8.6"
-set "TK_LIBRARY=%PYPREFIX%\tcl\tk8.6"
-echo TCL_LIBRARY=%TCL_LIBRARY%
-echo TK_LIBRARY=%TK_LIBRARY%
+rem 2026-10-03 regression fix: do NOT synthesise TCL_LIBRARY/TK_LIBRARY here.
+rem The old code did:
+rem     for /f %%p in ('python -c "import sys; print(sys.prefix)"') do set "PYPREFIX=%%p"
+rem     set "TCL_LIBRARY=%PYPREFIX%\tcl\tcl8.6"
+rem cmd.exe decodes the captured stdout with the console code page (GBK here), so
+rem with a non-ASCII profile path PYPREFIX came back mangled, the two variables
+rem pointed at a directory that does not exist, PyInstaller's tkinter hook then
+rem bailed out with "tkinter installation is broken" and silently EXCLUDED tkinter
+rem - the built tray died at startup with "ModuleNotFoundError: No module named
+rem 'tkinter'" (a bare "Handled error in script" dialog, no window).
+rem PyInstaller locates the tcl data on its own from sys.prefix (verified: with
+rem both variables unset, Analysis-00.toc contains tkinter/*, _tkinter.pyd,
+rem tcl86t.dll, tk86t.dll and warn-dsh-ctl.txt no longer lists tkinter).
+rem If tcl detection ever needs an override again, do it from Python (write the
+rem paths to a .cmd file and call it) - never through cmd.exe command substitution.
+if defined TCL_LIBRARY echo [note] TCL_LIBRARY is set by the caller: %TCL_LIBRARY%
+if defined TK_LIBRARY echo [note] TK_LIBRARY is set by the caller: %TK_LIBRARY%
 rem ============================================================
 rem  Icon protection: the program icon (DeepSeek Harness.ico) and the
 rem  tray icon (app_icon.png) are protected assets. Before building we
